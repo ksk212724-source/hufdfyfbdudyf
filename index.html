@@ -1,0 +1,783 @@
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { Zap, TrendingUp, Trophy, Ticket, BatteryCharging, Sparkles, Clock, Users, Copy, Check, Loader2 } from "lucide-react";
+
+// ---------------------------------------------------------------------------
+// IGNIS — signature visual identity
+// Subject: a molten, forge-born coin economy. Everything reads as metal being
+// worked — cracked lava fissures, a crucible glow rising from the ground, ember
+// sparks, a cast (not printed) coin face. This is deliberately NOT a flat
+// orange screen with a glossy coin; the signature element is the "crucible":
+// a pool of light at the base of the screen that the coin sits in, with heat
+// distortion cracks running up through the dark shell around it.
+// ---------------------------------------------------------------------------
+
+const LEAGUES = [
+  { name: "Бронза", threshold: 0, color: "text-amber-600", ring: "ring-amber-600/40", bar: "bg-amber-600", crack: "#c2650f" },
+  { name: "Серебро", threshold: 10000, color: "text-slate-300", ring: "ring-slate-300/40", bar: "bg-slate-300", crack: "#9fb0c2" },
+  { name: "Золото", threshold: 100000, color: "text-yellow-400", ring: "ring-yellow-400/50", bar: "bg-yellow-400", crack: "#facc15" },
+  { name: "Платина", threshold: 1000000, color: "text-cyan-300", ring: "ring-cyan-300/50", bar: "bg-cyan-300", crack: "#67e8f9" },
+  { name: "Алмаз", threshold: 10000000, color: "text-sky-300", ring: "ring-sky-300/60", bar: "bg-sky-300", crack: "#7dd3fc" },
+  { name: "Мастер", threshold: 100000000, color: "text-violet-300", ring: "ring-violet-300/60", bar: "bg-violet-300", crack: "#c4b5fd" },
+];
+
+const TAP_BASE_COST = 500;
+const ENERGY_BASE_COST = 800;
+const PROMO_CODE = "IGNIS";
+const PROMO_REWARD = 50000;
+const REFERRAL_BONUS_FOR_INVITEE = 15000;
+const REFERRAL_BONUS_FOR_INVITER = 20000;
+
+const PLAYER_KEY = "ignis-player-v1";
+const CODE_PREFIX = "ignis-code:";
+const PENDING_PREFIX = "ignis-refpending:";
+
+function fmt(n) {
+  return Math.floor(n || 0).toLocaleString("ru-RU");
+}
+function tapCost(level) {
+  return Math.round(TAP_BASE_COST * Math.pow(1.6, level - 1));
+}
+function energyCost(level) {
+  return Math.round(ENERGY_BASE_COST * Math.pow(1.5, level - 1));
+}
+function getLeagueIndex(totalEarned) {
+  let idx = 0;
+  for (let i = 0; i < LEAGUES.length; i++) {
+    if (totalEarned >= LEAGUES[i].threshold) idx = i;
+  }
+  return idx;
+}
+function randomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let s = "";
+  for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+function defaultPlayer() {
+  return {
+    balance: 0,
+    totalEarned: 0,
+    totalTaps: 0,
+    clickPower: 1,
+    tapLevel: 1,
+    energyMax: 1000,
+    energyLevel: 1,
+    energy: 1000,
+    promoUsed: false,
+    referralCode: "",
+    referredBy: null,
+    referralCount: 0,
+    referralEarned: 0,
+  };
+}
+
+// Cast-metal coin with lava fissures instead of a generic glossy medallion —
+// the crack pattern is the signature motif and reappears in the background.
+function CoinMark({ className, crackColor = "#ffb627" }) {
+  return (
+    <svg viewBox="0 0 100 100" className={className} role="img" aria-label="Монета IGNIS">
+      <defs>
+        <radialGradient id="coinFace" cx="38%" cy="30%" r="85%">
+          <stop offset="0%" stopColor="#3a2a1c" />
+          <stop offset="45%" stopColor="#241811" />
+          <stop offset="100%" stopColor="#0f0a07" />
+        </radialGradient>
+        <linearGradient id="coinRim" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#5a3f28" />
+          <stop offset="100%" stopColor="#100a06" />
+        </linearGradient>
+        <filter id="crackGlow" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="2.6" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+      </defs>
+      <circle cx="50" cy="50" r="48" fill="url(#coinRim)" />
+      <circle cx="50" cy="50" r="42" fill="url(#coinFace)" />
+      {/* fissure network, glowing like exposed magma seams */}
+      <g fill="none" stroke={crackColor} strokeWidth="1.6" strokeLinecap="round" filter="url(#crackGlow)" opacity="0.65">
+        <path d="M50 14 L46 32 L56 40 L48 52 L58 58 L50 74" />
+        <path d="M46 32 L30 30" />
+        <path d="M56 40 L72 36" />
+        <path d="M48 52 L28 56" />
+        <path d="M58 58 L76 64" />
+        <path d="M50 74 L44 88" />
+        <path d="M50 74 L60 86" />
+      </g>
+      <circle cx="50" cy="50" r="42" fill="none" stroke="#000" strokeWidth="1" opacity="0.4" />
+    </svg>
+  );
+}
+
+export default function IgnisClicker() {
+  const [loading, setLoading] = useState(true);
+  const [player, setPlayer] = useState(defaultPlayer());
+  const playerRef = useRef(player);
+  const dirtyRef = useRef(false);
+
+  const [tab, setTab] = useState("tap");
+  const [pressed, setPressed] = useState(false);
+  const [floaters, setFloaters] = useState([]);
+  const floaterId = useRef(0);
+
+  const [promoInput, setPromoInput] = useState("");
+  const [promoMsg, setPromoMsg] = useState("");
+
+  const [refInput, setRefInput] = useState("");
+  const [refMsg, setRefMsg] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  const [listingTarget] = useState(() => Date.now() + 3 * 24 * 60 * 60 * 1000);
+  const [timeLeft, setTimeLeft] = useState({ d: 3, h: 0, m: 0, s: 0 });
+
+  const updatePlayer = useCallback((updater) => {
+    setPlayer((p) => {
+      const next = typeof updater === "function" ? updater(p) : updater;
+      playerRef.current = next;
+      dirtyRef.current = true;
+      return next;
+    });
+  }, []);
+
+  const saveNow = useCallback(async () => {
+    try {
+      await window.storage.set(PLAYER_KEY, JSON.stringify(playerRef.current), false);
+      dirtyRef.current = false;
+    } catch (e) {
+      console.error("Save failed", e);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let loaded = null;
+      try {
+        const res = await window.storage.get(PLAYER_KEY, false);
+        if (res && res.value) loaded = JSON.parse(res.value);
+      } catch (e) {
+        loaded = null;
+      }
+      let base = loaded || defaultPlayer();
+
+      if (!base.referralCode) {
+        let code = randomCode();
+        try {
+          for (let i = 0; i < 8; i++) {
+            let taken = false;
+            try {
+              const existing = await window.storage.get(CODE_PREFIX + code, true);
+              taken = !!existing;
+            } catch (e) {
+              taken = false;
+            }
+            if (!taken) break;
+            code = randomCode();
+          }
+          await window.storage.set(CODE_PREFIX + code, "1", true);
+        } catch (e) {
+          console.error("Referral code registration failed", e);
+        }
+        base = { ...base, referralCode: code };
+      }
+
+      if (!cancelled) {
+        playerRef.current = base;
+        setPlayer(base);
+        setLoading(false);
+        try {
+          await window.storage.set(PLAYER_KEY, JSON.stringify(base), false);
+        } catch (e) {
+          console.error(e);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const iv = setInterval(() => {
+      if (dirtyRef.current) saveNow();
+    }, 4000);
+    return () => clearInterval(iv);
+  }, [saveNow]);
+
+  const claimPending = useCallback(async () => {
+    const code = playerRef.current.referralCode;
+    if (!code) return;
+    try {
+      const res = await window.storage.get(PENDING_PREFIX + code, true);
+      if (res && res.value) {
+        const pending = JSON.parse(res.value);
+        if (pending && (pending.amount > 0 || pending.count > 0)) {
+          updatePlayer((p) => ({
+            ...p,
+            balance: p.balance + pending.amount,
+            totalEarned: p.totalEarned + pending.amount,
+            referralEarned: p.referralEarned + pending.amount,
+            referralCount: p.referralCount + pending.count,
+          }));
+          await window.storage.set(PENDING_PREFIX + code, JSON.stringify({ count: 0, amount: 0 }), true);
+          await saveNow();
+        }
+      }
+    } catch (e) {
+      // no pending rewards yet
+    }
+  }, [updatePlayer, saveNow]);
+
+  useEffect(() => {
+    if (loading) return;
+    claimPending();
+    const iv = setInterval(claimPending, 15000);
+    return () => clearInterval(iv);
+  }, [loading, claimPending]);
+
+  useEffect(() => {
+    const iv = setInterval(() => {
+      const diff = Math.max(0, listingTarget - Date.now());
+      setTimeLeft({
+        d: Math.floor(diff / 86400000),
+        h: Math.floor((diff % 86400000) / 3600000),
+        m: Math.floor((diff % 3600000) / 60000),
+        s: Math.floor((diff % 60000) / 1000),
+      });
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [listingTarget]);
+
+  useEffect(() => {
+    const iv = setInterval(() => {
+      updatePlayer((p) => (p.energy >= p.energyMax ? p : { ...p, energy: Math.min(p.energyMax, p.energy + 2) }));
+    }, 500);
+    return () => clearInterval(iv);
+  }, [updatePlayer]);
+
+  useEffect(() => {
+    setFloaters([]);
+  }, [tab]);
+
+  const listingElapsedPct = Math.min(
+    100,
+    100 - ((timeLeft.d * 86400 + timeLeft.h * 3600 + timeLeft.m * 60 + timeLeft.s) / (3 * 86400)) * 100
+  );
+
+  const leagueIdx = getLeagueIndex(player.totalEarned);
+  const league = LEAGUES[leagueIdx];
+  const nextLeague = LEAGUES[leagueIdx + 1];
+  const leagueProgressPct = nextLeague
+    ? Math.min(100, ((player.totalEarned - league.threshold) / (nextLeague.threshold - league.threshold)) * 100)
+    : 100;
+
+  const handleTap = useCallback(
+    (e) => {
+      if (player.energy <= 0) return;
+      const power = player.clickPower;
+      updatePlayer((p) => ({
+        ...p,
+        balance: p.balance + power,
+        totalEarned: p.totalEarned + power,
+        totalTaps: p.totalTaps + 1,
+        energy: Math.max(0, p.energy - 1),
+      }));
+      setPressed(true);
+      setTimeout(() => setPressed(false), 90);
+
+      const rect = e.currentTarget.getBoundingClientRect();
+      const rawX = e.clientX ? e.clientX - rect.left : rect.width / 2 + (Math.random() * 60 - 30);
+      const rawY = e.clientY ? e.clientY - rect.top : rect.height / 2;
+      const x = Math.min(Math.max(rawX, 24), rect.width - 24);
+      const y = Math.min(Math.max(rawY, 24), rect.height - 24);
+      const id = floaterId.current++;
+      setFloaters((f) => [...f.slice(-12), { id, x, y, value: power }]);
+      setTimeout(() => {
+        setFloaters((f) => f.filter((fl) => fl.id !== id));
+      }, 850);
+    },
+    [player.energy, player.clickPower, updatePlayer]
+  );
+
+  const buyTapUpgrade = () => {
+    const cost = tapCost(player.tapLevel);
+    if (player.balance < cost) return;
+    updatePlayer((p) => ({ ...p, balance: p.balance - cost, clickPower: p.clickPower + 1, tapLevel: p.tapLevel + 1 }));
+    saveNow();
+  };
+
+  const buyEnergyUpgrade = () => {
+    const cost = energyCost(player.energyLevel);
+    if (player.balance < cost) return;
+    updatePlayer((p) => ({ ...p, balance: p.balance - cost, energyMax: p.energyMax + 500, energyLevel: p.energyLevel + 1 }));
+    saveNow();
+  };
+
+  const submitPromo = () => {
+    const code = promoInput.trim().toUpperCase();
+    if (player.promoUsed) {
+      setPromoMsg("Этот промокод уже активирован");
+      return;
+    }
+    if (code.length === 0) {
+      setPromoMsg("Введите промокод");
+      return;
+    }
+    if (code === PROMO_CODE) {
+      updatePlayer((p) => ({ ...p, balance: p.balance + PROMO_REWARD, totalEarned: p.totalEarned + PROMO_REWARD, promoUsed: true }));
+      setPromoMsg(`Промокод принят! +${fmt(PROMO_REWARD)} IGNIS`);
+      saveNow();
+    } else {
+      setPromoMsg("Промокод недействителен");
+    }
+  };
+
+  const submitReferral = async () => {
+    const code = refInput.trim().toUpperCase();
+    if (player.referredBy) {
+      setRefMsg("Ты уже активировал реферальный код");
+      return;
+    }
+    if (code.length === 0) {
+      setRefMsg("Введите код");
+      return;
+    }
+    if (code === player.referralCode) {
+      setRefMsg("Нельзя использовать свой собственный код");
+      return;
+    }
+    try {
+      const existing = await window.storage.get(CODE_PREFIX + code, true);
+      if (!existing) {
+        setRefMsg("Такого кода не существует");
+        return;
+      }
+    } catch (e) {
+      setRefMsg("Такого кода не существует");
+      return;
+    }
+
+    updatePlayer((p) => ({
+      ...p,
+      referredBy: code,
+      balance: p.balance + REFERRAL_BONUS_FOR_INVITEE,
+      totalEarned: p.totalEarned + REFERRAL_BONUS_FOR_INVITEE,
+    }));
+    await saveNow();
+    setRefMsg(`Код принят! +${fmt(REFERRAL_BONUS_FOR_INVITEE)} IGNIS`);
+
+    try {
+      let pending = { count: 0, amount: 0 };
+      try {
+        const res = await window.storage.get(PENDING_PREFIX + code, true);
+        if (res && res.value) pending = JSON.parse(res.value);
+      } catch (e) {
+        pending = { count: 0, amount: 0 };
+      }
+      pending.count = (pending.count || 0) + 1;
+      pending.amount = (pending.amount || 0) + REFERRAL_BONUS_FOR_INVITER;
+      await window.storage.set(PENDING_PREFIX + code, JSON.stringify(pending), true);
+    } catch (e) {
+      console.error("Failed to credit referrer", e);
+    }
+  };
+
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(player.referralCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      setCopied(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#0c0805] flex items-center justify-center">
+        <Loader2 className="w-8 h-8 text-amber-400 animate-spin" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#0c0805] flex justify-center">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap');
+        .font-display { font-family: 'Sora', sans-serif; }
+        .font-body { font-family: 'Inter', sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+
+        /* Crucible: the signature ambient glow rising from the base of the screen */
+        @keyframes crucibleFlicker {
+          0%, 100% { opacity: 0.85; }
+          50% { opacity: 1; }
+        }
+        .crucible-glow { animation: crucibleFlicker 3.6s ease-in-out infinite; }
+
+        @keyframes coinPulse {
+          0%, 100% { filter: blur(0.4px) drop-shadow(0 0 34px rgba(255,140,40,0.4)); }
+          50% { filter: blur(0.4px) drop-shadow(0 0 56px rgba(255,180,60,0.6)); }
+        }
+        .coin-pulse { animation: coinPulse 2.8s ease-in-out infinite; }
+
+        /* Haze: a soft, low-contrast film over the whole scene so nothing
+           reads as crisp or printed — everything feels like it's seen
+           through warm, drifting smoke. */
+        @keyframes hazeDrift {
+          0% { transform: translate(0, 0) scale(1); }
+          50% { transform: translate(-2%, -1.5%) scale(1.04); }
+          100% { transform: translate(0, 0) scale(1); }
+        }
+        .haze-layer { animation: hazeDrift 18s ease-in-out infinite; filter: blur(38px); }
+
+        @keyframes floatUp {
+          0% { opacity: 1; transform: translateY(0) scale(1); }
+          100% { opacity: 0; transform: translateY(-70px) scale(1.35); }
+        }
+        .floating-number { animation: floatUp 0.85s ease-out forwards; }
+
+        @keyframes emberRise {
+          0% { opacity: 0; transform: translateY(0) translateX(0); }
+          12% { opacity: 1; }
+          100% { opacity: 0; transform: translateY(-160px) translateX(var(--dx)); }
+        }
+        .ember-particle { animation: emberRise 3.6s ease-in infinite; }
+      `}</style>
+
+      <div className="w-full max-w-md min-h-screen relative overflow-hidden font-body">
+        {/* Crucible base glow — warm light pooling at the bottom of the screen,
+            fading to near-black at the top. This replaces a flat colored
+            background and is the design's central signature. */}
+        <div
+          className="pointer-events-none absolute inset-0 crucible-glow"
+          style={{
+            background:
+              "radial-gradient(ellipse 130% 65% at 50% 120%, rgba(255,138,36,0.32) 0%, rgba(184,64,18,0.16) 38%, rgba(20,12,8,0.0) 68%), linear-gradient(180deg, #0e0906 0%, #150f0a 55%, #1d130b 100%)",
+          }}
+        ></div>
+        {/* drifting haze — two soft blurred blobs that slowly wander, so the
+            whole backdrop feels smoky and diffuse rather than lit and flat */}
+        <div className="pointer-events-none absolute inset-0 overflow-hidden opacity-70">
+          <div className="haze-layer absolute -top-10 -left-16 w-80 h-80 rounded-full bg-orange-600/25"></div>
+          <div className="haze-layer absolute bottom-0 -right-20 w-96 h-96 rounded-full bg-amber-500/15" style={{ animationDelay: "-6s" }}></div>
+        </div>
+        {/* faint fissure lines etched into the backdrop, echoing the coin motif */}
+        <svg className="pointer-events-none absolute inset-x-0 bottom-0 w-full h-64 opacity-[0.06] blur-[2px]" viewBox="0 0 400 260" preserveAspectRatio="none">
+          <path d="M40 260 L60 190 L30 150 L70 100 L50 40" fill="none" stroke="#ffb627" strokeWidth="2" />
+          <path d="M360 260 L340 200 L370 150 L330 90 L350 30" fill="none" stroke="#ffb627" strokeWidth="2" />
+        </svg>
+        {/* overall frosted film so text and panels sit behind a soft haze */}
+        <div className="pointer-events-none absolute inset-0 backdrop-blur-[1px] bg-black/10"></div>
+
+        <div className="relative flex flex-col min-h-screen pb-24">
+          {/* header */}
+          <div className="flex items-center justify-between px-5 pt-6">
+            <div className="flex items-center gap-2">
+              <CoinMark className="w-8 h-8" crackColor={league.crack} />
+              <span className="font-display font-bold text-white text-lg tracking-tight">IGNIS</span>
+            </div>
+            <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#1a120b]/55 border border-[#3a2515]/60 backdrop-blur-md ring-1 ${league.ring}`}>
+              <Trophy className={`w-3.5 h-3.5 ${league.color}`} />
+              <span className={`text-xs font-semibold ${league.color}`}>{league.name}</span>
+            </div>
+          </div>
+
+          {/* listing countdown */}
+          <div className="mx-5 mt-4 rounded-2xl bg-[#1a120b]/50 border border-[#3a2515]/60 backdrop-blur-md px-4 py-3 backdrop-blur-sm">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-1.5 text-amber-200/50 text-xs font-medium">
+                <Clock className="w-3.5 h-3.5" />
+                <span>Листинг IGNIS на бирже через</span>
+              </div>
+            </div>
+            <div className="flex items-baseline gap-3 font-mono text-white">
+              <span className="text-xl font-bold">{timeLeft.d}<span className="text-xs text-amber-200/40 font-body ml-0.5">д</span></span>
+              <span className="text-xl font-bold">{String(timeLeft.h).padStart(2, "0")}<span className="text-xs text-amber-200/40 font-body ml-0.5">ч</span></span>
+              <span className="text-xl font-bold">{String(timeLeft.m).padStart(2, "0")}<span className="text-xs text-amber-200/40 font-body ml-0.5">м</span></span>
+              <span className="text-xl font-bold text-amber-400">{String(timeLeft.s).padStart(2, "0")}<span className="text-xs text-amber-200/40 font-body ml-0.5">с</span></span>
+            </div>
+            <div className="mt-2 h-1 rounded-full bg-[#3a2515] overflow-hidden">
+              <div className="h-full bg-gradient-to-r from-amber-500 to-orange-400 rounded-full" style={{ width: `${listingElapsedPct}%` }}></div>
+            </div>
+          </div>
+
+          {/* balance */}
+          <div className="text-center mt-6">
+            <div className="text-amber-200/40 text-xs font-medium tracking-wide uppercase">Баланс</div>
+            <div className="font-mono text-5xl font-bold text-white/90 mt-1 tracking-tight" style={{ textShadow: "0 0 24px rgba(255,170,80,0.35)" }}>{fmt(player.balance)}</div>
+            <div className="text-amber-200/40 text-xs mt-1">1 IGNIS (реальный) = 50 000 тапов</div>
+          </div>
+
+          {/* tab content */}
+          <div className="flex-1 px-5 mt-6">
+            {tab === "tap" && (
+              <div className="flex flex-col items-center">
+                <div className="w-full flex items-center gap-2 mb-6">
+                  <BatteryCharging className="w-4 h-4 text-orange-300 shrink-0" />
+                  <div className="flex-1 h-2 rounded-full bg-[#3a2515] overflow-hidden">
+                    <div className="h-full bg-orange-300 rounded-full transition-all" style={{ width: `${(player.energy / player.energyMax) * 100}%` }}></div>
+                  </div>
+                  <span className="text-amber-200/40 text-xs font-medium w-16 text-right">{Math.floor(player.energy)}/{player.energyMax}</span>
+                </div>
+
+                <button
+                  onClick={handleTap}
+                  className="relative w-64 h-64 rounded-full flex items-center justify-center select-none overflow-visible focus:outline-none focus-visible:ring-4 focus-visible:ring-amber-400/60"
+                  aria-label="Тапнуть по IGNIS"
+                >
+                  {[...Array(7)].map((_, i) => (
+                    <span
+                      key={i}
+                      className="ember-particle absolute bottom-8 w-1.5 h-1.5 rounded-full bg-orange-300"
+                      style={{ left: `${14 + i * 11}%`, animationDelay: `${i * 0.45}s`, "--dx": `${(i % 2 === 0 ? 1 : -1) * (12 + i * 5)}px` }}
+                    ></span>
+                  ))}
+                  <div
+                    className={`coin-pulse relative w-44 h-44 rounded-full transition-transform ${
+                      pressed ? "scale-90" : "scale-100"
+                    }`}
+                  >
+                    <CoinMark className="w-full h-full" crackColor={league.crack} />
+                  </div>
+                  {floaters.map((f) => (
+                    <span
+                      key={f.id}
+                      className="floating-number absolute font-mono font-bold text-orange-300 text-xl pointer-events-none z-10"
+                      style={{ left: f.x, top: f.y }}
+                    >
+                      +{f.value}
+                    </span>
+                  ))}
+                </button>
+
+                <div className="mt-6 grid grid-cols-2 gap-3 w-full">
+                  <div className="rounded-xl bg-[#1a120b]/50 border border-[#3a2515]/60 backdrop-blur-md px-4 py-3 text-center">
+                    <div className="text-amber-200/40 text-xs">За тап</div>
+                    <div className="font-mono font-bold text-white text-lg">+{player.clickPower}</div>
+                  </div>
+                  <div className="rounded-xl bg-[#1a120b]/50 border border-[#3a2515]/60 backdrop-blur-md px-4 py-3 text-center">
+                    <div className="text-amber-200/40 text-xs">Всего тапов</div>
+                    <div className="font-mono font-bold text-white text-lg">{fmt(player.totalTaps)}</div>
+                  </div>
+                </div>
+
+                {player.energy <= 0 && (
+                  <div className="mt-4 text-amber-400 text-xs font-medium">Энергия закончилась — подожди восстановления</div>
+                )}
+              </div>
+            )}
+
+            {tab === "boost" && (
+              <div className="flex flex-col gap-3">
+                <div className="rounded-2xl bg-[#1a120b]/50 border border-[#3a2515]/60 backdrop-blur-md p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-9 h-9 rounded-full bg-amber-400/10 flex items-center justify-center">
+                        <Zap className="w-4 h-4 text-amber-400" />
+                      </div>
+                      <div>
+                        <div className="text-white text-sm font-semibold">Сила тапа</div>
+                        <div className="text-amber-200/40 text-xs">Уровень {player.tapLevel} · сейчас +{player.clickPower} за тап</div>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={buyTapUpgrade}
+                    disabled={player.balance < tapCost(player.tapLevel)}
+                    className="mt-3 w-full py-2.5 rounded-xl font-semibold text-sm bg-gradient-to-r from-amber-400 to-orange-600 text-[#0c0805] disabled:opacity-30 disabled:cursor-not-allowed transition-opacity"
+                  >
+                    Улучшить · {fmt(tapCost(player.tapLevel))} IGNIS
+                  </button>
+                </div>
+
+                <div className="rounded-2xl bg-[#1a120b]/50 border border-[#3a2515]/60 backdrop-blur-md p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-9 h-9 rounded-full bg-orange-400/10 flex items-center justify-center">
+                        <BatteryCharging className="w-4 h-4 text-orange-300" />
+                      </div>
+                      <div>
+                        <div className="text-white text-sm font-semibold">Энергия</div>
+                        <div className="text-amber-200/40 text-xs">Уровень {player.energyLevel} · максимум {fmt(player.energyMax)}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={buyEnergyUpgrade}
+                    disabled={player.balance < energyCost(player.energyLevel)}
+                    className="mt-3 w-full py-2.5 rounded-xl font-semibold text-sm bg-gradient-to-r from-orange-300 to-orange-600 text-[#0c0805] disabled:opacity-30 disabled:cursor-not-allowed transition-opacity"
+                  >
+                    Улучшить · {fmt(energyCost(player.energyLevel))} IGNIS
+                  </button>
+                </div>
+
+                <div className="rounded-2xl bg-[#1a120b]/25 border border-[#3a2515]/40 backdrop-blur-md p-4 flex items-start gap-2">
+                  <TrendingUp className="w-4 h-4 text-amber-200/40 mt-0.5 shrink-0" />
+                  <p className="text-amber-200/40 text-xs leading-relaxed">
+                    Каждое улучшение дороже предыдущего. Копи IGNIS тапами, чтобы расти быстрее.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {tab === "league" && (
+              <div className="flex flex-col gap-3">
+                {nextLeague && (
+                  <div className="rounded-2xl bg-[#1a120b]/50 border border-[#3a2515]/60 backdrop-blur-md p-4">
+                    <div className="flex items-center justify-between text-xs mb-2">
+                      <span className="text-amber-200/40">До лиги «{nextLeague.name}»</span>
+                      <span className="text-slate-200 font-medium">{fmt(Math.max(0, nextLeague.threshold - player.totalEarned))} IGNIS</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-[#3a2515] overflow-hidden">
+                      <div className={`h-full rounded-full ${league.bar}`} style={{ width: `${leagueProgressPct}%` }}></div>
+                    </div>
+                  </div>
+                )}
+                {LEAGUES.map((l, i) => {
+                  const reached = player.totalEarned >= l.threshold;
+                  const current = i === leagueIdx;
+                  return (
+                    <div
+                      key={l.name}
+                      className={`rounded-2xl border p-4 flex items-center justify-between ${
+                        current ? `bg-[#1a120b]/70 ${l.ring} ring-1 border-[#4a2f1a]` : "bg-[#1a120b]/20 border-[#3a2515]/40 backdrop-blur-md"
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`w-10 h-10 rounded-full flex items-center justify-center bg-[#241608] ${reached ? "" : "opacity-40"}`}>
+                          <Trophy className={`w-5 h-5 ${l.color}`} />
+                        </div>
+                        <div>
+                          <div className={`text-sm font-semibold ${reached ? "text-white" : "text-amber-200/40"}`}>{l.name}</div>
+                          <div className="text-amber-200/40 text-xs">от {fmt(l.threshold)} IGNIS</div>
+                        </div>
+                      </div>
+                      {current && <span className="text-xs font-semibold text-amber-400">Сейчас</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {tab === "promo" && (
+              <div className="flex flex-col gap-4">
+                <div className="rounded-2xl bg-[#1a120b]/50 border border-[#3a2515]/60 backdrop-blur-md p-5 text-center">
+                  <div className="w-12 h-12 rounded-full bg-amber-400/10 flex items-center justify-center mx-auto mb-3">
+                    <Ticket className="w-6 h-6 text-amber-400" />
+                  </div>
+                  <div className="text-white font-semibold text-sm mb-1">Промокод</div>
+                  <p className="text-amber-200/40 text-xs mb-4">Введи код, чтобы получить бонусные IGNIS</p>
+                  <input
+                    value={promoInput}
+                    onChange={(e) => setPromoInput(e.target.value)}
+                    placeholder="Введите код"
+                    className="w-full text-center bg-[#0c0805] border border-[#3a2515] rounded-xl py-2.5 text-white text-sm tracking-widest uppercase placeholder-amber-200/20 focus:outline-none focus:border-amber-400"
+                  />
+                  <button
+                    onClick={submitPromo}
+                    className="mt-3 w-full py-2.5 rounded-xl font-semibold text-sm bg-gradient-to-r from-amber-400 to-orange-600 text-[#0c0805]"
+                  >
+                    Активировать
+                  </button>
+                  {promoMsg && (
+                    <div className={`mt-3 flex items-center justify-center gap-1.5 text-xs font-medium ${promoMsg.startsWith("Промокод принят") ? "text-amber-400" : "text-rose-400"}`}>
+                      {promoMsg.startsWith("Промокод принят") && <Sparkles className="w-3.5 h-3.5" />}
+                      {promoMsg}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {tab === "referral" && (
+              <div className="flex flex-col gap-3">
+                <div className="rounded-2xl bg-[#1a120b]/50 border border-[#3a2515]/60 backdrop-blur-md p-5 text-center">
+                  <div className="w-12 h-12 rounded-full bg-amber-400/10 flex items-center justify-center mx-auto mb-3">
+                    <Users className="w-6 h-6 text-amber-400" />
+                  </div>
+                  <div className="text-white font-semibold text-sm mb-1">Твой реферальный код</div>
+                  <p className="text-amber-200/40 text-xs mb-4">
+                    Поделись кодом — друг получит +{fmt(REFERRAL_BONUS_FOR_INVITEE)} IGNIS, а ты +{fmt(REFERRAL_BONUS_FOR_INVITER)} IGNIS за каждого
+                  </p>
+                  <div className="flex items-center gap-2 bg-[#0c0805] border border-[#3a2515] rounded-xl px-4 py-3">
+                    <span className="flex-1 font-mono text-lg tracking-[0.3em] text-orange-300 text-center">{player.referralCode}</span>
+                    <button onClick={copyCode} className="shrink-0 w-8 h-8 rounded-lg bg-[#241608] flex items-center justify-center">
+                      {copied ? <Check className="w-4 h-4 text-amber-400" /> : <Copy className="w-4 h-4 text-amber-200/40" />}
+                    </button>
+                  </div>
+                  <p className="text-amber-200/25 text-[10px] mt-2">Код виден другим игрокам, которые его вводят</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-xl bg-[#1a120b]/50 border border-[#3a2515]/60 backdrop-blur-md px-4 py-3 text-center">
+                    <div className="text-amber-200/40 text-xs">Приглашено</div>
+                    <div className="font-mono font-bold text-white text-lg">{fmt(player.referralCount)}</div>
+                  </div>
+                  <div className="rounded-xl bg-[#1a120b]/50 border border-[#3a2515]/60 backdrop-blur-md px-4 py-3 text-center">
+                    <div className="text-amber-200/40 text-xs">Заработано</div>
+                    <div className="font-mono font-bold text-white text-lg">{fmt(player.referralEarned)}</div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl bg-[#1a120b]/50 border border-[#3a2515]/60 backdrop-blur-md p-5 text-center">
+                  <div className="text-white font-semibold text-sm mb-1">Есть чужой код?</div>
+                  <p className="text-amber-200/40 text-xs mb-4">
+                    {player.referredBy ? `Ты уже активировал код ${player.referredBy}` : "Введи код друга и получи бонус"}
+                  </p>
+                  <input
+                    value={refInput}
+                    onChange={(e) => setRefInput(e.target.value)}
+                    placeholder="Код друга"
+                    disabled={!!player.referredBy}
+                    className="w-full text-center bg-[#0c0805] border border-[#3a2515] rounded-xl py-2.5 text-white text-sm tracking-widest uppercase placeholder-amber-200/20 focus:outline-none focus:border-amber-400 disabled:opacity-40"
+                  />
+                  <button
+                    onClick={submitReferral}
+                    disabled={!!player.referredBy}
+                    className="mt-3 w-full py-2.5 rounded-xl font-semibold text-sm bg-gradient-to-r from-orange-300 to-orange-600 text-[#0c0805] disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    Активировать код
+                  </button>
+                  {refMsg && (
+                    <div className={`mt-3 flex items-center justify-center gap-1.5 text-xs font-medium ${refMsg.startsWith("Код принят") ? "text-amber-400" : "text-rose-400"}`}>
+                      {refMsg.startsWith("Код принят") && <Sparkles className="w-3.5 h-3.5" />}
+                      {refMsg}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* bottom nav */}
+        <div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-[#0c0805]/75 border-t border-[#3a2515]/50 backdrop-blur-xl px-2 py-3 flex justify-between z-20">
+          {[
+            { id: "tap", label: "Тап", icon: Zap },
+            { id: "boost", label: "Прокачка", icon: TrendingUp },
+            { id: "league", label: "Лига", icon: Trophy },
+            { id: "referral", label: "Друзья", icon: Users },
+            { id: "promo", label: "Промо", icon: Ticket },
+          ].map((t) => {
+            const Icon = t.icon;
+            const active = tab === t.id;
+            return (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                className="flex flex-col items-center gap-1 px-2 py-1 focus:outline-none"
+              >
+                <Icon className={`w-5 h-5 ${active ? "text-amber-400" : "text-amber-200/25"}`} />
+                <span className={`text-[10px] font-medium ${active ? "text-amber-400" : "text-amber-200/25"}`}>{t.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
